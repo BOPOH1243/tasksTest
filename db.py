@@ -1,11 +1,11 @@
 # database.py
-
+import os
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 import asyncio
 # URL для подключения к базе данных PostgreSQL
-DATABASE_URL = "postgresql+asyncpg://myuser:mypassword@localhost:5432/mydb"
+DATABASE_URL = os.getenv('DATABASE_URL', "postgresql+asyncpg://myuser:mypassword@localhost:5432/mydb")
 
 # Создание асинхронного двигателя SQLAlchemy
 engine = create_async_engine(DATABASE_URL, echo=True)
