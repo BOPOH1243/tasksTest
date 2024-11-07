@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, APIRouter, status
+from fastapi import FastAPI, Depends, HTTPException, APIRouter, status, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from db import get_async_session, init_db
@@ -10,8 +10,20 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 import os
 from models import User
+from redis_cache import redis_client
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+async def store_refresh_token(username: str, refresh_token: str):
+    # Храним refresh токен в Redis с истечением через REFRESH_TOKEN_EXPIRE_DAYS
+    await redis_client.setex(f"refresh_token:{username}", timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS), refresh_token)
+
+async def get_refresh_token_from_redis(username: str):
+    # Получаем refresh токен из Redis
+    return await redis_client.get(f"refresh_token:{username}")
+
+async def delete_refresh_token_from_redis(username: str):
+    # Удаляем refresh токен из Redis
+    await redis_client.delete(f"refresh_token:{username}")
 
 
 
@@ -77,34 +89,54 @@ async def register_user(user_data: UserCreate, db: AsyncSession = Depends(get_as
     db_user = await crud_user.get_user_by_username(db, username=user_data.username)
     if db_user:
         raise HTTPException(status_code=400, detail="Username already registered")
+    # Хешируем пароль и сохраняем пользователя
     hashed_password = hash_password(user_data.password)
     new_user = await crud_user.create_user(db, username=user_data.username, password_hash=hashed_password)
 
     access_token = create_access_token(data={"sub": new_user.username})
     refresh_token = create_refresh_token(data={"sub": new_user.username})
+
+    # Сохраняем refresh токен в Redis
+    await store_refresh_token(new_user.username, refresh_token)
+
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 @app.post("/auth/login", response_model=Token)
 async def login_user(user_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_async_session)):
-    print(user_data)
     db_user = await crud_user.get_user_by_username(db, username=user_data.username)
     if not db_user or not verify_password(user_data.password, db_user.password_hash):
         raise HTTPException(status_code=400, detail="Incorrect username or password")
 
     access_token = create_access_token(data={"sub": db_user.username})
     refresh_token = create_refresh_token(data={"sub": db_user.username})
+
+    # Сохраняем refresh токен в Redis
+    await store_refresh_token(db_user.username, refresh_token)
+    print({"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"})
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 @app.post("/auth/refresh", response_model=Token)
-async def refresh_token(refresh_token: str = Depends(oauth2_scheme)):
+async def refresh_token(refresh_token: str = Body(), db: AsyncSession = Depends(get_async_session)):
     try:
+        # Проверка refresh токена через Redis
         payload = jwt.decode(refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
         if username is None:
             raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Получаем refresh токен из Redis
+        stored_refresh_token = await get_refresh_token_from_redis(username)
+        if stored_refresh_token != refresh_token:
+            raise HTTPException(status_code=401, detail="Refresh token not valid")
+
         new_access_token = create_access_token(data={"sub": username})
         new_refresh_token = create_refresh_token(data={"sub": username})
+
+        # Обновляем refresh токен в Redis
+        await store_refresh_token(username, new_refresh_token)
+
         return {"access_token": new_access_token, "refresh_token": new_refresh_token, "token_type": "bearer"}
+    
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
     
